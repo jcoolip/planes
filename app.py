@@ -6,6 +6,7 @@ import requests
 import psycopg
 import time
 from datetime import datetime
+from math import atan2, cos, radians, sin, sqrt
 
 def load_config():
     with open('config.json', 'r') as f:
@@ -16,27 +17,51 @@ def get_db(config):
     # Connect to an existing database
     return psycopg.connect(f"host={config['host']} dbname={config['database']} user={config['user']} password={config['password']}")
 
-def upsert_aircraft(cur, row):
 
+def distance_miles(lat1, lon1, lat2, lon2):
+    earth_radius_miles = 3958.8
+
+    lat1 = radians(lat1)
+    lon1 = radians(lon1)
+    lat2 = radians(lat2)
+    lon2 = radians(lon2)
+
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+
+    a = (
+        sin(delta_lat / 2) ** 2
+        + cos(lat1) * cos(lat2) * sin(delta_lon / 2) ** 2
+    )
+
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+    return earth_radius_miles * c
+
+def upsert_aircraft(cur, row):
     cur.execute(
         """
-            INSERT INTO aircraft (
-                hex,
-                registration,
-                aircraft_type,
-                description,
-                db_flags,
-                first_seen,
-                last_seen
-            )
-            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
-            ON CONFLICT (hex)
-            DO UPDATE SET
-                registration = EXCLUDED.registration,
-                aircraft_type = EXCLUDED.aircraft_type,
-                description = EXCLUDED.description,
-                db_flags = EXCLUDED.db_flags,
-                last_seen = NOW()
+        INSERT INTO aircraft (
+            hex,
+            registration,
+            aircraft_type,
+            description,
+            db_flags,
+            first_seen,
+            last_seen,
+            owner_operator,
+            category
+        )
+        VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), %s, %s)
+        ON CONFLICT (hex)
+        DO UPDATE SET
+            registration = EXCLUDED.registration,
+            aircraft_type = EXCLUDED.aircraft_type,
+            description = EXCLUDED.description,
+            db_flags = EXCLUDED.db_flags,
+            last_seen = NOW(),
+            owner_operator = EXCLUDED.owner_operator,
+            category = EXCLUDED.category
         """,
         (
             row["hex"],
@@ -44,6 +69,8 @@ def upsert_aircraft(cur, row):
             row["aircraft_type"],
             row["description"],
             row["db_flags"],
+            row["owner_operator"],
+            row["category"],
         ),
     )
 
@@ -55,6 +82,7 @@ def insert_observation(cur, row):
             callsign,
             latitude,
             longitude,
+            distance_miles,
             altitude_ft,
             on_ground,
             ground_speed,
@@ -65,8 +93,9 @@ def insert_observation(cur, row):
             seen_seconds
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s
         )
         """,
         (
@@ -74,6 +103,7 @@ def insert_observation(cur, row):
             row["callsign"],
             row["lat"],
             row["lon"],
+            row["distance_miles"],
             row["altitude_ft"],
             row["on_ground"],
             row["ground_speed"],
@@ -106,7 +136,7 @@ def deg_to_compass(deg):
     idx = int((d / 45.0) + 0.5) % 8
     return directions[idx]
 
-def assign_flights(flights):
+def assign_flights(flights, config):
     data = []
 
     for flight in flights:
@@ -124,6 +154,19 @@ def assign_flights(flights):
             altitude_ft = int(altitude)
             on_ground = False
 
+        aircraft_lat = flight.get("lat")
+        aircraft_lon = flight.get("lon")
+
+        if aircraft_lat is not None and aircraft_lon is not None:
+            distance = distance_miles(
+                float(config["lat"]),
+                float(config["lon"]),
+                aircraft_lat,
+                aircraft_lon,
+            )
+        else:
+            distance = None
+
         row = {
             "hex": flight.get("hex"),
             "callsign": (
@@ -135,8 +178,9 @@ def assign_flights(flights):
             "aircraft_type": flight.get("t"),
             "description": flight.get("desc"),
 
-            "lat": flight.get("lat"),
-            "lon": flight.get("lon"),
+            "lat": aircraft_lat,
+            "lon": aircraft_lon,
+            "distance_miles": round(distance, 2) if distance is not None else None,
 
             "altitude_ft": altitude_ft,
             "on_ground": on_ground,
@@ -151,6 +195,10 @@ def assign_flights(flights):
             "seen": flight.get("seen"),
             "messages": flight.get("messages"),
             "db_flags": flight.get("dbFlags", 0),
+
+            "owner_operator": flight.get("ownOp"),
+            "category": flight.get("category")
+
         }    
 
         data.append(row)
