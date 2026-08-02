@@ -212,7 +212,7 @@ while True:
     try:
         response_data = fetch_flights(config)
         flights = response_data.get("ac", [])
-        data = assign_flights(flights)
+        data = assign_flights(flights, config)
 
         stored = 0
 
