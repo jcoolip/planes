@@ -4,6 +4,8 @@
     "user": "USER",
     "password": "PASSWORD",
     "database": "DATABASE",
-    "url": "https://api.airplanes.live/v2/point/LATITUDE/LONGITUDE/AREA",
+    "url": "https://api.airplanes.live/v2/point/",
+    "lat": "LATITUDE",
+    "lon": "LONGITUDE",
     "area": "50"
 }
