@@ -55,13 +55,28 @@ def upsert_aircraft(cur, row):
         VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), %s, %s)
         ON CONFLICT (hex)
         DO UPDATE SET
-            registration = EXCLUDED.registration,
-            aircraft_type = EXCLUDED.aircraft_type,
-            description = EXCLUDED.description,
+            registration = COALESCE(
+                EXCLUDED.registration,
+                aircraft.registration
+            ),
+            aircraft_type = COALESCE(
+                EXCLUDED.aircraft_type,
+                aircraft.aircraft_type
+            ),
+            description = COALESCE(
+                EXCLUDED.description,
+                aircraft.description
+            ),
             db_flags = EXCLUDED.db_flags,
             last_seen = NOW(),
-            owner_operator = EXCLUDED.owner_operator,
-            category = EXCLUDED.category
+            owner_operator = COALESCE(
+                EXCLUDED.owner_operator,
+                aircraft.owner_operator
+            ),
+            category = COALESCE(
+                EXCLUDED.category,
+                aircraft.category
+            )
         """,
         (
             row["hex"],
