@@ -1,0 +1,9 @@
+{
+    "host": "HOSTNAME",
+    "port": 5432,
+    "user": "USER",
+    "password": "PASSWORD",
+    "database": "DATABASE",
+    "url": "https://api.airplanes.live/v2/point/LATITUDE/LONGITUDE/AREA",
+    "area": "50"
+}
