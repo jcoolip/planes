@@ -4,6 +4,8 @@
 import json
 import requests
 import psycopg
+import time
+from datetime import datetime
 
 def load_config():
     with open('config.json', 'r') as f:
@@ -12,27 +14,87 @@ def load_config():
 
 def get_db(config):
     # Connect to an existing database
-    return psycopg.connect(f"dbname={config['database']} user={config['user']}")
+    return psycopg.connect(f"host={config['host']} dbname={config['database']} user={config['user']} password={config['password']}")
 
-# def insert_rows(conn):
+def upsert_aircraft(cur, row):
 
-#         # Open a cursor to perform database operations
-#         with conn.cursor() as cur:
+    cur.execute(
+        """
+            INSERT INTO aircraft (
+                hex,
+                registration,
+                aircraft_type,
+                description,
+                db_flags,
+                first_seen,
+                last_seen
+            )
+            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            ON CONFLICT (hex)
+            DO UPDATE SET
+                registration = EXCLUDED.registration,
+                aircraft_type = EXCLUDED.aircraft_type,
+                description = EXCLUDED.description,
+                db_flags = EXCLUDED.db_flags,
+                last_seen = NOW()
+        """,
+        (
+            row["hex"],
+            row["registration"],
+            row["aircraft_type"],
+            row["description"],
+            row["db_flags"],
+        ),
+    )
 
-#             # Pass data to fill a query placeholders and let Psycopg perform
-#             # the correct conversion (no SQL injections!)
-#             cur.execute(
-#                 "INSERT INTO aircraft (hex, registration, aircraft_type, description, db_flags, first_seen, last_seen) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-#                 (100, "abc'def"))
-
-#             # Make the changes to the database persistent
-#             conn.commit()
+def insert_observation(cur, row):
+    cur.execute(
+        """
+        INSERT INTO aircraft_observations (
+            aircraft_hex,
+            callsign,
+            latitude,
+            longitude,
+            altitude_ft,
+            on_ground,
+            ground_speed,
+            track_degrees,
+            track_direction,
+            baro_rate,
+            emergency,
+            seen_seconds
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            row["hex"],
+            row["callsign"],
+            row["lat"],
+            row["lon"],
+            row["altitude_ft"],
+            row["on_ground"],
+            row["ground_speed"],
+            row["track_deg"],
+            row["track_dir"],
+            row["baro_rate"],
+            row["emergency"],
+            row["seen"],
+        ),
+    )
 
 def fetch_flights(config):
-    url = config['url'] + config['area']
+    url = (
+        f"{config['url']}"
+        f"{config['lat']}/"
+        f"{config['lon']}/"
+        f"{config['area']}"
+    )
+
     response = requests.get(url, timeout=10)
     response.raise_for_status()
-
     return response.json()
 
 def deg_to_compass(deg):
@@ -44,50 +106,87 @@ def deg_to_compass(deg):
     idx = int((d / 45.0) + 0.5) % 8
     return directions[idx]
 
+def assign_flights(flights):
+    data = []
+
+    for flight in flights:
+
+        track = flight.get('track')
+
+        altitude = flight.get("alt_baro")
+        if altitude == "ground":
+            altitude_ft = None
+            on_ground = True
+        elif altitude is None:
+            altitude_ft = None
+            on_ground = False
+        else:
+            altitude_ft = int(altitude)
+            on_ground = False
+
+        row = {
+            "hex": flight.get("hex"),
+            "callsign": (
+                flight["flight"].strip()
+                if flight.get("flight")
+                else None
+            ),
+            "registration": flight.get("r"),
+            "aircraft_type": flight.get("t"),
+            "description": flight.get("desc"),
+
+            "lat": flight.get("lat"),
+            "lon": flight.get("lon"),
+
+            "altitude_ft": altitude_ft,
+            "on_ground": on_ground,
+
+            "ground_speed": flight.get("gs"),
+
+            "track_deg": track,
+            "track_dir": deg_to_compass(track),
+
+            "baro_rate": flight.get("baro_rate"),
+            "emergency": flight.get("emergency"),
+            "seen": flight.get("seen"),
+            "messages": flight.get("messages"),
+            "db_flags": flight.get("dbFlags", 0),
+        }    
+
+        data.append(row)
+    return data
+
 config = load_config()
-# conn = get_db(config)
-print(f"{config['url']+config['area']}")
-f = fetch_flights(config)
-total = f.get('total', 0)
-flights = f.get('ac', [])
-print(f"Aircraft reported: {total}")
 
-data = []
 
-for flight in flights:
 
-    track = flight.get('track')
-    altitude = flight.get('alt_baro')
-    if altitude == "ground":
-        altitude_text = "On ground"
-    elif altitude is None:
-        altitude_text = "Unknown altitude"
-    else:
-        altitude_text = f"{altitude:,} ft"
+while True:
+    try:
+        response_data = fetch_flights(config)
+        flights = response_data.get("ac", [])
+        data = assign_flights(flights)
 
-    row = {
-        "hex": flight.get('hex'),
-        "callsign": (flight.get('flight') or "Unknown callsign").strip(),
-        "registration": flight.get('r') or "Unknown registration",
-        "aircraft_type": flight.get('t') or "Unknown Type",
-        "description": flight.get('desc') or "Unknown description",
+        stored = 0
 
-        "lat": flight.get('lat'),
-        "lon": flight.get('lon'),
-        "alt_baro": flight.get('alt_baro'),
-        "ground_speed": flight.get('gs'),
+        with get_db(config) as conn:
+            with conn.cursor() as cur:
+                for row in data:
+                    if row["hex"] is None:
+                        continue
 
-        "track_deg": track,
-        "track_dir": deg_to_compass(track),
+                    upsert_aircraft(cur, row)
+                    insert_observation(cur, row)
+                    stored += 1
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        print(f"{timestamp} Stored {stored} aircraft observations")
 
-        "baro_rate": flight.get('baro_rate'),
-        "emergency": flight.get('emergency'),
-        "seen": flight.get('seen'),
-        "messages": flight.get('messages'),
-        "db_flags": flight.get('dbFlags', 0)
-    }
+    except requests.RequestException as exc:
+        print(f"API error: {exc}")
 
-    data.append(row)
+    except psycopg.Error as exc:
+        print(f"Database error: {exc}")
 
-for row in data:
-    print(row)
+    except Exception as exc:
+        print(f"Unexpected error: {exc}")
+
+    time.sleep(config.get("poll_interval", 20))
