@@ -17,7 +17,6 @@ def get_db(config):
     # Connect to an existing database
     return psycopg.connect(f"host={config['host']} dbname={config['database']} user={config['user']} password={config['password']}")
 
-
 def distance_miles(lat1, lon1, lat2, lon2):
     earth_radius_miles = 3958.8
 
@@ -130,6 +129,219 @@ def insert_observation(cur, row):
         ),
     )
 
+def upsert_active_aircraft(cur, row):
+    cur.execute(
+        """
+        INSERT INTO active_aircraft (
+            aircraft_hex,
+            callsign,
+            latitude,
+            longitude,
+            distance_miles,
+            altitude_ft,
+            on_ground,
+            ground_speed,
+            track_degrees,
+            track_direction,
+            baro_rate,
+            emergency,
+            entered_at,
+            last_seen_at,
+            closest_distance_miles,
+            closest_at,
+            closest_altitude_ft,
+            minimum_altitude_ft,
+            maximum_altitude_ft,
+            maximum_ground_speed,
+            observation_count,
+            entry_latitude,
+            entry_longitude,
+            entry_altitude_ft,
+            entry_distance_miles
+        )
+        VALUES (
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s,
+            NOW(), NOW(),
+            %s, NOW(), %s,
+            %s, %s, %s,
+            1, %s, %s, %s, %s
+        )
+        ON CONFLICT (aircraft_hex)
+        DO UPDATE SET
+            callsign = COALESCE(EXCLUDED.callsign, active_aircraft.callsign),
+            latitude = EXCLUDED.latitude,
+            longitude = EXCLUDED.longitude,
+            distance_miles = EXCLUDED.distance_miles,
+            altitude_ft = EXCLUDED.altitude_ft,
+            on_ground = EXCLUDED.on_ground,
+            ground_speed = EXCLUDED.ground_speed,
+            track_degrees = EXCLUDED.track_degrees,
+            track_direction = EXCLUDED.track_direction,
+            baro_rate = EXCLUDED.baro_rate,
+            emergency = EXCLUDED.emergency,
+            last_seen_at = NOW(),
+
+            closest_distance_miles = CASE
+                WHEN active_aircraft.closest_distance_miles IS NULL
+                    THEN EXCLUDED.distance_miles
+                WHEN EXCLUDED.distance_miles IS NULL
+                    THEN active_aircraft.closest_distance_miles
+                ELSE LEAST(
+                    active_aircraft.closest_distance_miles,
+                    EXCLUDED.distance_miles
+                )
+            END,
+
+            closest_at = CASE
+                WHEN EXCLUDED.distance_miles IS NOT NULL
+                 AND (
+                    active_aircraft.closest_distance_miles IS NULL
+                    OR EXCLUDED.distance_miles
+                       < active_aircraft.closest_distance_miles
+                 )
+                    THEN NOW()
+                ELSE active_aircraft.closest_at
+            END,
+
+            closest_altitude_ft = CASE
+                WHEN EXCLUDED.distance_miles IS NOT NULL
+                 AND (
+                    active_aircraft.closest_distance_miles IS NULL
+                    OR EXCLUDED.distance_miles
+                       < active_aircraft.closest_distance_miles
+                 )
+                    THEN EXCLUDED.altitude_ft
+                ELSE active_aircraft.closest_altitude_ft
+            END,
+
+            minimum_altitude_ft = CASE
+                WHEN active_aircraft.minimum_altitude_ft IS NULL
+                    THEN EXCLUDED.altitude_ft
+                WHEN EXCLUDED.altitude_ft IS NULL
+                    THEN active_aircraft.minimum_altitude_ft
+                ELSE LEAST(
+                    active_aircraft.minimum_altitude_ft,
+                    EXCLUDED.altitude_ft
+                )
+            END,
+
+            maximum_altitude_ft = CASE
+                WHEN active_aircraft.maximum_altitude_ft IS NULL
+                    THEN EXCLUDED.altitude_ft
+                WHEN EXCLUDED.altitude_ft IS NULL
+                    THEN active_aircraft.maximum_altitude_ft
+                ELSE GREATEST(
+                    active_aircraft.maximum_altitude_ft,
+                    EXCLUDED.altitude_ft
+                )
+            END,
+
+            maximum_ground_speed = CASE
+                WHEN active_aircraft.maximum_ground_speed IS NULL
+                    THEN EXCLUDED.ground_speed
+                WHEN EXCLUDED.ground_speed IS NULL
+                    THEN active_aircraft.maximum_ground_speed
+                ELSE GREATEST(
+                    active_aircraft.maximum_ground_speed,
+                    EXCLUDED.ground_speed
+                )
+            END,
+
+            observation_count =
+                active_aircraft.observation_count + 1
+        """,
+        (
+            row["hex"],
+            row["callsign"],
+            row["lat"],
+            row["lon"],
+            row["distance_miles"],
+            row["altitude_ft"],
+            row["on_ground"],
+            row["ground_speed"],
+            row["track_deg"],
+            row["track_dir"],
+            row["baro_rate"],
+            row["emergency"],
+
+            row["distance_miles"],
+            row["altitude_ft"],
+            row["altitude_ft"],
+            row["altitude_ft"],
+            row["ground_speed"],
+            row["lat"],
+            row["lon"],
+            row["altitude_ft"],
+            row["distance_miles"],
+        ),
+    )
+
+def finalize_stale_flyovers(cur, timeout_minutes=2):
+    cur.execute(
+        """
+        WITH stale AS (
+            DELETE FROM active_aircraft
+            WHERE last_seen_at < NOW() - (%s * INTERVAL '1 minute')
+            RETURNING *
+        )
+        INSERT INTO flyovers (
+            aircraft_hex,
+            callsign,
+            entered_at,
+            exited_at,
+
+            entry_latitude,
+            entry_longitude,
+            entry_altitude_ft,
+            entry_distance_miles,
+
+            exit_latitude,
+            exit_longitude,
+            exit_altitude_ft,
+            exit_distance_miles,
+
+            closest_distance_miles,
+            closest_at,
+            closest_altitude_ft,
+
+            minimum_altitude_ft,
+            maximum_altitude_ft,
+            maximum_ground_speed,
+
+            observation_count
+        )
+        SELECT
+            aircraft_hex,
+            callsign,
+            entered_at,
+            last_seen_at,
+
+            entry_latitude
+            entry_longitude
+            entry_altitude_ft
+            entry_distance_miles
+
+            latitude,
+            longitude,
+            altitude_ft,
+            distance_miles,
+
+            closest_distance_miles,
+            closest_at,
+            closest_altitude_ft,
+
+            minimum_altitude_ft,
+            maximum_altitude_ft,
+            maximum_ground_speed,
+
+            observation_count
+        FROM stale
+        """,
+        (timeout_minutes,),
+    )
+
 def fetch_flights(config):
     url = (
         f"{config['url']}"
@@ -238,8 +450,11 @@ while True:
                         continue
 
                     upsert_aircraft(cur, row)
+                    upsert_active_aircraft(cur, row)
                     insert_observation(cur, row)
                     stored += 1
+                
+                finalize_stale_flyovers(cur, timeout_minutes=2)
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         print(f"{timestamp} Stored {stored} aircraft observations")
 
