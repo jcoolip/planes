@@ -157,7 +157,9 @@ def upsert_active_aircraft(cur, row):
             entry_latitude,
             entry_longitude,
             entry_altitude_ft,
-            entry_distance_miles
+            entry_distance_miles,
+            closest_latitude,
+            closest_longitude
         )
         VALUES (
             %s, %s, %s, %s, %s,
@@ -166,7 +168,7 @@ def upsert_active_aircraft(cur, row):
             NOW(), NOW(),
             %s, NOW(), %s,
             %s, %s, %s,
-            1, %s, %s, %s, %s
+            1, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (aircraft_hex)
         DO UPDATE SET
@@ -214,6 +216,28 @@ def upsert_active_aircraft(cur, row):
                  )
                     THEN EXCLUDED.altitude_ft
                 ELSE active_aircraft.closest_altitude_ft
+            END,
+
+            closest_latitude = CASE
+                WHEN EXCLUDED.distance_miles IS NOT NULL
+                AND (
+                    active_aircraft.closest_distance_miles IS NULL
+                    OR EXCLUDED.distance_miles
+                    < active_aircraft.closest_distance_miles
+                )
+                    THEN EXCLUDED.latitude
+                ELSE active_aircraft.closest_latitude
+            END,
+
+            closest_longitude = CASE
+                WHEN EXCLUDED.distance_miles IS NOT NULL
+                AND (
+                    active_aircraft.closest_distance_miles IS NULL
+                    OR EXCLUDED.distance_miles
+                    < active_aircraft.closest_distance_miles
+                )
+                    THEN EXCLUDED.longitude
+                ELSE active_aircraft.closest_longitude
             END,
 
             minimum_altitude_ft = CASE
@@ -275,6 +299,8 @@ def upsert_active_aircraft(cur, row):
             row["lon"],
             row["altitude_ft"],
             row["distance_miles"],
+            row["lat"],  # closest_latitude
+            row["lon"],  # closest_longitude
         ),
     )
 
@@ -305,6 +331,8 @@ def finalize_stale_flyovers(cur, timeout_minutes=2):
             closest_distance_miles,
             closest_at,
             closest_altitude_ft,
+            closest_latitude,
+            closest_longitude,
 
             minimum_altitude_ft,
             maximum_altitude_ft,
@@ -331,6 +359,8 @@ def finalize_stale_flyovers(cur, timeout_minutes=2):
             closest_distance_miles,
             closest_at,
             closest_altitude_ft,
+            closest_latitude,
+            closest_longitude,
 
             minimum_altitude_ft,
             maximum_altitude_ft,
