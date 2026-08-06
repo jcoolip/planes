@@ -318,10 +318,10 @@ def finalize_stale_flyovers(cur, timeout_minutes=2):
             entered_at,
             last_seen_at,
 
-            entry_latitude
-            entry_longitude
-            entry_altitude_ft
-            entry_distance_miles
+            entry_latitude,
+            entry_longitude,
+            entry_altitude_ft,
+            entry_distance_miles,
 
             latitude,
             longitude,
