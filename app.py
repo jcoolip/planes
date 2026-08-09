@@ -8,6 +8,8 @@ import time
 from datetime import datetime
 from math import atan2, cos, radians, sin, sqrt
 
+
+
 def load_config():
     with open('config.json', 'r') as f:
         config = json.load(f)
@@ -302,7 +304,20 @@ def upsert_active_aircraft(cur, row):
             row["lat"],  # closest_latitude
             row["lon"],  # closest_longitude
         ),
+
     )
+
+def active_aircraft_exists(cur, hex_code):
+    cur.execute(
+        """
+        SELECT 1
+        FROM active_aircraft
+        WHERE aircraft_hex = %s
+        """,
+        (hex_code,)
+    )
+
+    return cur.fetchone() is not None
 
 def finalize_stale_flyovers(cur, timeout_minutes=2):
     cur.execute(
@@ -456,14 +471,96 @@ def assign_flights(flights, config):
             "owner_operator": flight.get("ownOp"),
             "category": flight.get("category")
 
-        }    
+        }
 
         data.append(row)
     return data
 
+def send_military_alert(row):
+    identifier = row["callsign"] or row["registration"] or row["hex"]
+    description = row["description"] or "Unknown military aircraft"
+    altitude = (
+        f"{row['altitude_ft']:,} ft"
+        if row["altitude_ft"] is not None
+        else "altitude unknown"
+	)
+
+    distance = (
+        f"{row['distance_miles']:.1f} mi"
+        if row["distance_miles"] is not None
+        else "distance unknown"
+	)
+
+
+    message = (
+        f"{description}\n"
+        f"{identifier}\n"
+        f"{distance} · {altitude}"
+    )
+
+    try:
+        requests.post(
+            "http://pentium:8090/military-aircraft",
+            data=message,
+            headers={
+                "Title": "Military Aircraft Nearby",
+                "Priority": "high",
+                "Tags": "military_helmet",
+            },
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        print(f"military aircraft ntfy alert failed {e}")
+
+def send_rare_aircraft(row):
+    identifier = row["callsign"] or row["registration"] or row["hex"]
+    description = row["description"] or "Unknown rare aircraft"
+    altitude = (
+        f"{row['altitude_ft']:,} ft"
+        if row["altitude_ft"] is not None
+        else "altitude unknown"
+	)
+
+    distance = (
+        f"{row['distance_miles']:.1f} mi"
+        if row["distance_miles"] is not None
+        else "distance unknown"
+	)
+
+
+    message = (
+        f"{description}\n"
+        f"{identifier}\n"
+        f"{distance} · {altitude}"
+    )
+
+    try:
+        requests.post(
+            "http://pentium:8090/rare-aircraft",
+            data=message,
+            headers={
+                "Title": "Rare Aircraft Nearby",
+                "Priority": "high",
+                "Tags": "small_airplane",
+            },
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        print(f"rare aircraft ntfy alert failed {e}")
+
+
+
 config = load_config()
 
-
+RARE_TYPES = {
+    "A388",
+    "B748",
+    "B744",
+    "BLCF",
+    "MD11",
+    "P180",
+    "S61",
+}
 
 while True:
     try:
@@ -475,18 +572,61 @@ while True:
 
         with get_db(config) as conn:
             with conn.cursor() as cur:
+
+                now = datetime.now().astimezone().strftime("%H:%M:%S")
+                print(f"{now} | {len(data)} aircraft")
+
                 for row in data:
                     if row["hex"] is None:
                         continue
 
+                    was_active = active_aircraft_exists(cur, row["hex"])
+
                     upsert_aircraft(cur, row)
                     upsert_active_aircraft(cur, row)
+
+                    identifier = row["callsign"] or row["registration"] or row["hex"]
+                    aircraft_type = row["aircraft_type"] or "----"
+
+                    distance = (
+                        f'{row["distance_miles"]:.1f} mi'
+                        if row["distance_miles"] is not None
+                        else "--"
+                    )
+
+                    altitude = (
+                        f'{row["altitude_ft"]:,} ft'
+                        if row["altitude_ft"] is not None
+                        else "--"
+                    )
+
+                    direction = row["track_dir"] or "--"
+
+                    print(
+                        f"  {identifier:<9} "
+                        f"{aircraft_type:<5} "
+                        f"{distance:>8} "
+                        f"{altitude:>10} "
+                        f"{direction:>2}"
+                    )
+
+                    military = (row["db_flags"] or 0) & 1
+                    rare = row["aircraft_type"] in RARE_TYPES
+
+                    if not was_active and military:
+                        send_military_alert(row)
+                        print(f">>> ALERT: MILITARY | {row['description']} | {identifier}")
+
+                    elif not was_active and rare:
+                        send_rare_aircraft_alert(row)
+                        print(f">>> ALERT: RARE | {row['description']} | {identifier}")
+
+
+
                     insert_observation(cur, row)
                     stored += 1
-                
+
                 finalize_stale_flyovers(cur, timeout_minutes=2)
-        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        print(f"{timestamp} Stored {stored} aircraft observations")
 
     except requests.RequestException as exc:
         print(f"API error: {exc}")
